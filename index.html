@@ -98,6 +98,1074 @@
   <script src="vendor/d3.min.js"></script>
   <script src="vendor/topojson-client.min.js"></script>
   <script src="data/admin1.js"></script>
-  <script src="main_operation.js"></script>
+  <script>
+    /* Glubdivision — guess the mystery first-level subdivision. */
+    (() => {
+      "use strict";
+
+      const EARTH_KM = 6371;
+      const STORE_KEY = "glubdivision:v1";
+      const OLD_STORE_KEY = "hinterland:v1"; // the gam_e's previous name
+      const WIN = "#3ddc84";
+      const $ = (id) => document.getElementById(id);
+
+      // ------------------------------------------------------------------ data
+
+      const topo = window.ADMIN1_TOPOLOGY;
+      const layer = topo.objects.admin1;
+
+      const norm = (s) =>
+        s
+          .normalize("NFD")
+          .replace(/[̀-ͯ]/g, "")
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, " ")
+          .trim();
+
+      const regions = layer.geometries.map((g, i) => {
+        const p = g.properties;
+        const alts = p.a || [];
+        const key = norm(p.n);
+        const altKeys = alts.map(norm);
+        return {
+          i,
+          id: g.id,
+          name: p.n,
+          country: p.c,
+          type: p.t || "",
+          alts,
+          key,
+          altKeys,
+          hay: [key, ...altKeys, norm(p.c)].join(" | "),
+          geom: g,
+        };
+      });
+      const byId = new Map(regions.map((r) => [r.id, r]));
+      const neighbors = topojson.neighbors(layer.geometries);
+
+      const feature = (r) => r.feature || (r.feature = topojson.feature(topo, r.geom));
+      const centroid = (r) => r.centroid || (r.centroid = d3.geoCentroid(feature(r)));
+      // Rough angular radius, used to decide when a region needs a marker dot.
+      const extent = (r) => (r.extent !== undefined ? r.extent : (r.extent = Math.sqrt(d3.geoArea(feature(r)))));
+
+      // Boundary as unit vectors, with long edges subdivided so border-to-border
+      // distance stays accurate for large, coarsely drawn regions.
+      function boundary(r) {
+        if (r.vec) return r.vec;
+        const rings = [];
+        const geo = feature(r).geometry;
+        const polys = geo.type === "Polygon" ? [geo.coordinates] : geo.coordinates;
+        for (const poly of polys) for (const ring of poly) rings.push(ring.map(toVec));
+
+        let perimeter = 0;
+        for (const ring of rings) for (let k = 1; k < ring.length; k++) perimeter += angle(ring[k - 1], ring[k]);
+        const step = Math.max(0.004, perimeter / 1500);
+
+        const out = [];
+        for (const ring of rings) {
+          for (let k = 1; k < ring.length; k++) {
+            const a = ring[k - 1], b = ring[k];
+            out.push(a[0], a[1], a[2]);
+            const n = Math.floor(angle(a, b) / step);
+            for (let j = 1; j < n; j++) {
+              const t = j / n;
+              const x = a[0] + (b[0] - a[0]) * t, y = a[1] + (b[1] - a[1]) * t, z = a[2] + (b[2] - a[2]) * t;
+              const m = Math.hypot(x, y, z) || 1;
+              out.push(x / m, y / m, z / m);
+            }
+          }
+        }
+        return (r.vec = new Float64Array(out));
+      }
+
+      function toVec([lon, lat]) {
+        const l = (lon * Math.PI) / 180, p = (lat * Math.PI) / 180, c = Math.cos(p);
+        return [c * Math.cos(l), c * Math.sin(l), Math.sin(p)];
+      }
+      const angle = (a, b) => Math.acos(Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2])));
+
+      /** Shortest border-to-border distance in km. Touching regions are 0. */
+      function distanceKm(a, b) {
+        if (a === b || neighbors[a.i].includes(b.i)) return 0;
+        const A = boundary(a), B = boundary(b);
+        let best = -1;
+        for (let i = 0; i < A.length; i += 3) {
+          const x = A[i], y = A[i + 1], z = A[i + 2];
+          for (let j = 0; j < B.length; j += 3) {
+            const d = x * B[j] + y * B[j + 1] + z * B[j + 2];
+            if (d > best) best = d;
+          }
+        }
+        return Math.max(1, Math.acos(Math.min(1, best)) * EARTH_KM);
+      }
+
+      // 0 (other side of the planet) … 1 (touching)
+      const closeness = (km) => 1 - Math.min(1, Math.sqrt(km / 12000));
+      const ramp = d3.interpolateRgbBasis(["#34508f", "#6f97cf", "#e6dfc6", "#f0a354", "#e2572f", "#b0122f"]);
+      const colorFor = (km) => ramp(closeness(km));
+
+      // ------------------------------------------------------------- persistence
+
+      let saved = {};
+      try { saved = JSON.parse(localStorage.getItem(STORE_KEY) || localStorage.getItem(OLD_STORE_KEY)) || {}; } catch { /* storage unavailable */ }
+      const persist = () => {
+        try { localStorage.setItem(STORE_KEY, JSON.stringify(saved)); } catch { /* ignore */ }
+      };
+
+      const pad = (n) => String(n).padStart(2, "0");
+      const dateKey = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+      const today = dateKey();
+
+      function dailyAnswerId(date) {
+        let h = 2166136261;
+        for (const ch of "glubdivision/" + date) h = Math.imul(h ^ ch.charCodeAt(0), 16777619);
+        h ^= h >>> 15; h = Math.imul(h, 2246822507); h ^= h >>> 13;
+        return regions[(h >>> 0) % regions.length].id;
+      }
+      // Practice can be limited to a set of countries (empty = the whole world).
+      const countryCounts = new Map();
+      for (const r of regions) countryCounts.set(r.country, (countryCounts.get(r.country) || 0) + 1);
+      const cleanCountries = (list) => (Array.isArray(list) ? list.filter((c) => countryCounts.has(c)) : []);
+      const randomAnswerId = (countries = []) => {
+        const pool = countries.length ? regions.filter((r) => countries.includes(r.country)) : regions;
+        return pool[Math.floor(Math.random() * pool.length)].id;
+      };
+      const newPractice = () => fresh({ answer: randomAnswerId(saved.countries), countries: [...saved.countries] });
+      const fresh = (extra) => ({ guesses: [], hints: 0, done: null, ...extra });
+
+      saved.unit = saved.unit === "mi" ? "mi" : "km";
+      saved.mode = saved.mode === "practice" ? "practice" : "daily";
+      saved.stats = { played: 0, won: 0, guessTotal: 0, streak: 0, best: 0, lastDaily: null, ...saved.stats };
+      if (!saved.daily || saved.daily.date !== today) saved.daily = fresh({ date: today });
+      saved.countries = cleanCountries(saved.countries);
+      if (!saved.practice || !byId.has(saved.practice.answer)) saved.practice = newPractice();
+      saved.practice.countries = cleanCountries(saved.practice.countries);
+      for (const g of [saved.daily, saved.practice]) g.guesses = (g.guesses || []).filter((id) => byId.has(id));
+
+      // ------------------------------------------------------------- gam_e state
+
+      let gam_e, answer, entries, latestId = null, allowed = null;
+
+      function loadMode() {
+        gam_e = saved[saved.mode];
+        allowed = saved.mode === "practice" && gam_e.countries.length ? new Set(gam_e.countries) : null;
+        answer = byId.get(saved.mode === "daily" ? dailyAnswerId(gam_e.date) : gam_e.answer);
+        entries = gam_e.guesses.map(makeEntry);
+        latestId = null;
+      }
+
+      function makeEntry(id) {
+        const region = byId.get(id);
+        const km = distanceKm(region, answer);
+        return { region, km, color: region === answer ? WIN : colorFor(km) };
+      }
+
+      const fmtDist = (km) => {
+        const v = saved.unit === "mi" ? km * 0.621371 : km;
+        return `${Math.round(v).toLocaleString("en")} ${saved.unit}`;
+      };
+      const subtitle = (r) => (r.type && norm(r.name) !== norm(r.country) ? `${r.type} · ${r.country}` : r.country);
+      const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+      function guess(region) {
+        if (gam_e.done) return;
+        const existing = entries.find((e) => e.region === region);
+        if (existing) {
+          latestId = region.id;
+          setStatus(`You already tried <b>${esc(region.name)}</b>.`);
+          renderList();
+          flyTo(region);
+          return;
+        }
+        const best = entries.length ? Math.min(...entries.map((e) => e.km)) : Infinity;
+        const entry = makeEntry(region.id);
+        entries.push(entry);
+        gam_e.guesses.push(region.id);
+        latestId = region.id;
+
+        if (region === answer) {
+          finish("won");
+        } else if (entry.km === 0) {
+          setStatus(`<b>${esc(region.name)}</b> <span class="good">borders the mystery region!</span>`);
+        } else {
+          const tail = entry.km < best && entries.length > 1 ? ' <span class="good">Closest yet.</span>' : "";
+          setStatus(`<b>${esc(region.name)}</b> is ${fmtDist(entry.km)} away.${tail}`);
+        }
+        persist();
+        renderAll();
+        flyTo(region);
+      }
+
+      function finish(outcome) {
+        gam_e.done = outcome;
+        const s = saved.stats;
+        s.played++;
+        if (outcome === "won") { s.won++; s.guessTotal += entries.length; }
+        if (saved.mode === "daily") {
+          if (outcome === "won") {
+            const y = new Date(); y.setDate(y.getDate() - 1);
+            s.streak = s.lastDaily === dateKey(y) ? s.streak + 1 : 1;
+            s.best = Math.max(s.best, s.streak);
+            s.lastDaily = gam_e.date;
+          } else {
+            s.streak = 0;
+          }
+        }
+        setStatus("");
+      }
+
+      const HINTS = [
+        () => (answer.type ? `It's a ${answer.type.toLowerCase()}` : null),
+        () => (allowed && allowed.size === 1 ? null : `It's in ${answer.country}`),
+        () => `Starts with “${answer.name[0]}”, ${answer.name.length} characters`,
+      ];
+      const hintTexts = () => HINTS.map((h) => h()).filter(Boolean);
+
+      // ---------------------------------------------------------------- UI: DOM
+
+      const input = $("guess-input"), list = $("suggestions"), form = $("guess-form");
+      const statusEl = $("status");
+      const setStatus = (html) => { statusEl.innerHTML = html; };
+
+      function renderAll() {
+        for (const tab of document.querySelectorAll(".tabs button")) {
+          tab.setAttribute("aria-selected", String(tab.dataset.mode === saved.mode));
+        }
+        form.hidden = !!gam_e.done;
+        $("actions").hidden = !!gam_e.done;
+        statusEl.hidden = !!gam_e.done;
+        $("unit-btn").textContent = saved.unit;
+
+        const hints = hintTexts();
+        $("hints").innerHTML = hints.slice(0, gam_e.hints).map((h) => `<li>${esc(h)}</li>`).join("");
+        $("hint-btn").disabled = gam_e.hints >= hints.length;
+        $("hint-btn").textContent = gam_e.hints >= hints.length ? "No more hints" : `Hint ${gam_e.hints + 1}/${hints.length}`;
+
+        if (!gam_e.done && !statusEl.innerHTML) {
+          setStatus(
+            entries.length
+              ? "Keep going — warmer colours are closer."
+              : saved.mode === "daily"
+                ? "Today's mystery region is waiting. Make a first guess."
+                : allowed
+                  ? `A mystery region in ${esc(poolLabel(gam_e.countries))} is waiting.`
+                  : "A random mystery region is waiting. Make a first guess."
+          );
+        }
+        $("pool").hidden = saved.mode !== "practice";
+        $("pool-btn").textContent = poolLabel(saved.mode === "practice" ? gam_e.countries : []);
+        renderResult();
+        renderList();
+        layout();
+        redraw();
+      }
+
+      function renderList() {
+        const sorted = [...entries].sort((a, b) => a.km - b.km || (a.region === answer ? -1 : 1));
+        $("guess-count").textContent = entries.length;
+        const misses = entries.filter((e) => e.region !== answer);
+        $("closest").innerHTML =
+          misses.length && !gam_e.done ? `closest <b>${fmtDist(Math.min(...misses.map((e) => e.km)))}</b>` : "";
+        $("guess-list").innerHTML = sorted
+          .map((e) => {
+            const r = e.region;
+            const dist = r === answer ? "✓" : e.km === 0 ? "borders" : fmtDist(e.km);
+            return `<li data-id="${esc(r.id)}" class="${r.id === latestId ? "latest" : ""}">
+              <span class="chip" style="background:${e.color}"></span>
+              <span><div class="g-name">${esc(r.name)}</div><div class="g-sub">${esc(subtitle(r))}</div></span>
+              <span class="g-dist">${dist}</span></li>`;
+          })
+          .join("");
+        const latest = $("guess-list").querySelector(".latest");
+        if (latest) latest.scrollIntoView({ block: "nearest" });
+      }
+
+      function renderResult() {
+        const el = $("result");
+        el.hidden = !gam_e.done;
+        if (!gam_e.done) return;
+        const won = gam_e.done === "won";
+        const s = saved.stats;
+        const n = entries.length;
+        const hintNote = gam_e.hints ? ` · ${gam_e.hints} hint${gam_e.hints > 1 ? "s" : ""}` : "";
+        el.className = "result" + (won ? "" : " lost");
+        el.innerHTML = `
+          <div class="kicker">${won ? `Found in ${n} guess${n === 1 ? "" : "es"}${hintNote}` : "The mystery region was"}</div>
+          <h3>${esc(answer.name)}</h3>
+          <div class="where">${esc(subtitle(answer))}</div>
+          <div class="stats">
+            <div><b>${s.played}</b><span>played</span></div>
+            <div><b>${s.played ? Math.round((100 * s.won) / s.played) : 0}%</b><span>found</span></div>
+            <div><b>${s.won ? (s.guessTotal / s.won).toFixed(1) : "–"}</b><span>avg</span></div>
+            <div><b>${s.streak}</b><span>streak</span></div>
+          </div>
+          <div class="row">
+            ${won ? '<button class="btn primary" data-act="share">Share</button>' : ""}
+            <button class="btn ${won ? "" : "primary"}" data-act="practice">${saved.mode === "practice" ? "New gam_e" : "Play practice"}</button>
+            <button class="btn" data-act="show">Show on globe</button>
+          </div>
+          ${saved.mode === "daily" ? `<p class="next">Next daily region in ${untilMidnight()}.</p>` : ""}`;
+      }
+
+      function untilMidnight() {
+        const now = new Date();
+        const mins = Math.ceil((new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1) - now) / 60000);
+        return `${Math.floor(mins / 60)}h ${pad(mins % 60)}m`;
+      }
+
+      function shareText() {
+        const squares = entries.map((e) => {
+          if (e.region === answer) return "🟩";
+          const t = closeness(e.km);
+          return t < 0.35 ? "🟦" : t < 0.6 ? "⬜" : t < 0.78 ? "🟧" : "🟥";
+        });
+        const shown = squares.length > 40 ? [...squares.slice(0, 39), "…", "🟩"] : squares;
+        const label = saved.mode === "daily" ? gam_e.date : "practice";
+        const n = entries.length;
+        const hintNote = gam_e.hints ? `, ${gam_e.hints} hint${gam_e.hints > 1 ? "s" : ""}` : "";
+        return `Glubdivision ${label}\nFound in ${n} guess${n === 1 ? "" : "es"}${hintNote}\n${shown.join("")}`;
+      }
+
+      $("result").addEventListener("click", async (ev) => {
+        const act = ev.target.dataset && ev.target.dataset.act;
+        if (act === "share") {
+          const text = shareText();
+          let ok = false;
+          try { await navigator.clipboard.writeText(text); ok = true; } catch { /* fall through */ }
+          if (!ok) {
+            const ta = Object.assign(document.createElement("textarea"), { value: text });
+            document.body.append(ta); ta.select();
+            try { ok = document.execCommand("copy"); } catch { /* ignore */ }
+            ta.remove();
+          }
+          ev.target.textContent = ok ? "Copied!" : "Copy failed";
+          setTimeout(() => { ev.target.textContent = "Share"; }, 1600);
+        } else if (act === "practice") {
+          if (saved.mode === "practice" || saved.practice.done) saved.practice = newPractice();
+          switchMode("practice");
+          if (allowed) showPool();
+        } else if (act === "show") {
+          flyTo(answer);
+        }
+      });
+
+      function switchMode(mode) {
+        saved.mode = mode;
+        persist();
+        loadMode();
+        setStatus("");
+        closeSuggestions();
+        input.value = "";
+        renderAll();
+        if (gam_e.done) flyTo(answer);
+        else if (entries.length) flyTo(entries[entries.length - 1].region);
+      }
+
+      document.querySelector(".tabs").addEventListener("click", (ev) => {
+        const mode = ev.target.dataset.mode;
+        if (mode && mode !== saved.mode) switchMode(mode);
+      });
+
+      $("hint-btn").addEventListener("click", () => {
+        if (gam_e.done || gam_e.hints >= hintTexts().length) return;
+        gam_e.hints++;
+        persist();
+        renderAll();
+      });
+
+      let giveUpArmed = 0;
+      $("giveup-btn").addEventListener("click", (ev) => {
+        if (gam_e.done) return;
+        if (Date.now() - giveUpArmed > 4000) {
+          giveUpArmed = Date.now();
+          ev.target.textContent = "Sure? Click again";
+          setTimeout(() => { ev.target.textContent = "Give up"; }, 4000);
+          return;
+        }
+        giveUpArmed = 0;
+        ev.target.textContent = "Give up";
+        finish("lost");
+        persist();
+        renderAll();
+        flyTo(answer);
+      });
+
+      $("unit-btn").addEventListener("click", () => {
+        saved.unit = saved.unit === "km" ? "mi" : "km";
+        persist();
+        renderAll();
+      });
+
+      $("guess-list").addEventListener("click", (ev) => {
+        const li = ev.target.closest("li");
+        if (li) flyTo(byId.get(li.dataset.id));
+      });
+
+      const help = $("help");
+      $("total-count").textContent = regions.length.toLocaleString("en");
+      $("help-btn").addEventListener("click", () => help.showModal());
+      help.addEventListener("click", (ev) => { if (ev.target === help) help.close(); });
+      $("legend-bar").style.background = `linear-gradient(90deg, ${d3.range(0, 1.01, 0.1).map(ramp).join(",")})`;
+
+      // ----------------------------------------------------------- autocomplete
+
+      let matches = [], active = 0;
+
+      function search(text, guessed = new Set()) {
+        const q = norm(text);
+        if (!q) return [];
+        const tokens = q.split(" ");
+        const out = [];
+        for (const r of regions) {
+          if (allowed && !allowed.has(r.country)) continue;
+          if (guessed.has(r.id)) continue;
+          if (!tokens.every((t) => r.hay.includes(t))) continue;
+          let rank;
+          if (r.key === q) rank = 0;
+          else if (r.key.startsWith(q)) rank = 1;
+          else if (r.altKeys.includes(q)) rank = 1.5;
+          else if (r.key.includes(" " + q)) rank = 2;
+          else if (r.altKeys.some((a) => a.startsWith(q))) rank = 3;
+          else if (r.key.includes(q)) rank = 4;
+          else if (r.altKeys.some((a) => a.includes(q))) rank = 5;
+          else rank = tokens.some((t) => r.key.startsWith(t)) ? 6 : 7;
+          out.push([rank, r]);
+        }
+        out.sort((a, b) => a[0] - b[0] || a[1].key.length - b[1].key.length || a[1].key.localeCompare(b[1].key));
+        return out.map((m) => m[1]);
+      }
+
+      // Every match is listed; rows are added in chunks as the list scrolls.
+      const CHUNK = 60;
+      let rendered = 0;
+
+      function suggestionRow(r, i) {
+        const q = norm(input.value);
+        const via = !r.key.includes(q) ? r.alts.find((a) => norm(a).includes(q)) : null;
+        return `<li role="option" id="opt-${i}" data-i="${i}" aria-selected="${i === active}">
+          <span class="s-name">${esc(r.name)}${via ? ` <span class="s-sub">(${esc(via)})</span>` : ""}</span>
+          <span class="s-sub">${esc(subtitle(r))}</span></li>`;
+      }
+
+      function renderMore(upTo = rendered + CHUNK) {
+        const end = Math.min(matches.length, upTo);
+        if (end <= rendered) return;
+        list.insertAdjacentHTML("beforeend", matches.slice(rendered, end).map((r, k) => suggestionRow(r, rendered + k)).join(""));
+        rendered = end;
+      }
+
+      function showSuggestions() {
+        if (!input.value.trim()) return closeSuggestions();
+        const guessed = new Set(gam_e.guesses);
+        matches = search(input.value, guessed);
+        active = 0;
+        rendered = 0;
+        list.innerHTML = "";
+        list.scrollTop = 0;
+        if (matches.length) renderMore();
+        else {
+          const onlyGuessed = search(input.value).length > 0;
+          list.innerHTML = `<li class="none">${onlyGuessed ? "You've already guessed everything matching that." : "No subdivision matches that."}</li>`;
+        }
+        list.hidden = false;
+        input.setAttribute("aria-expanded", "true");
+        input.setAttribute("aria-activedescendant", matches.length ? "opt-0" : "");
+      }
+
+      list.addEventListener("scroll", () => {
+        if (list.scrollTop + list.clientHeight > list.scrollHeight - 200) renderMore();
+      });
+
+      function closeSuggestions() {
+        list.hidden = true;
+        matches = [];
+        input.setAttribute("aria-expanded", "false");
+        input.removeAttribute("aria-activedescendant");
+      }
+
+      function setActive(i) {
+        if (!matches.length) return;
+        const prev = list.children[active];
+        active = (i + matches.length) % matches.length;
+        if (active >= rendered) renderMore(active + CHUNK);
+        if (prev) prev.setAttribute("aria-selected", "false");
+        list.children[active].setAttribute("aria-selected", "true");
+        input.setAttribute("aria-activedescendant", `opt-${active}`);
+        list.children[active].scrollIntoView({ block: "nearest" });
+      }
+
+      function choose(region) {
+        input.value = "";
+        closeSuggestions();
+        guess(region);
+      }
+
+      input.addEventListener("input", showSuggestions);
+      input.addEventListener("focus", () => { if (input.value.trim()) showSuggestions(); });
+      input.addEventListener("keydown", (ev) => {
+        if (ev.key === "ArrowDown") { ev.preventDefault(); list.hidden ? showSuggestions() : setActive(active + 1); }
+        else if (ev.key === "ArrowUp") { ev.preventDefault(); setActive(active - 1); }
+        else if (ev.key === "Escape") closeSuggestions();
+      });
+      form.addEventListener("submit", (ev) => {
+        ev.preventDefault();
+        if (list.hidden) showSuggestions();
+        if (matches.length) choose(matches[active]);
+      });
+      list.addEventListener("pointerdown", (ev) => {
+        const li = ev.target.closest("li[data-i]");
+        if (!li) return;
+        ev.preventDefault();
+        choose(matches[+li.dataset.i]);
+      });
+      document.addEventListener("pointerdown", (ev) => { if (!form.contains(ev.target)) closeSuggestions(); });
+
+      // ------------------------------------------------------------------ globe
+      //
+      // The globe is drawn by hand rather than through d3's projection pipeline:
+      // every boundary is stored once as unit vectors, and each frame is a single
+      // 3×3 rotation per point. That is roughly an order of magnitude cheaper than
+      // d3's clip/resample stream, which matters while dragging.
+
+      const canvas = $("globe"), ctx = canvas.getContext("2d");
+      const projection = d3.geoOrthographic().clipAngle(90).precision(0); // dots + picking only
+      const TAU = 2 * Math.PI, RAD = Math.PI / 180;
+
+      /** Unit vectors for a lon/lat line, with long edges subdivided along the great circle. */
+      function toShape(coords) {
+        const out = [];
+        let prev = null;
+        for (const ll of coords) {
+          const v = toVec(ll);
+          if (prev) {
+            const n = Math.ceil(angle(prev, v) / RAD);
+            for (let j = 1; j < n; j++) {
+              const t = j / n;
+              const x = prev[0] + (v[0] - prev[0]) * t, y = prev[1] + (v[1] - prev[1]) * t, z = prev[2] + (v[2] - prev[2]) * t;
+              const m = Math.hypot(x, y, z) || 1;
+              out.push(x / m, y / m, z / m);
+            }
+          }
+          out.push(v[0], v[1], v[2]);
+          prev = v;
+        }
+        const v = new Float32Array(out);
+        // bounding cap (centre + angular radius) for culling
+        let cx = 0, cy = 0, cz = 0;
+        for (let i = 0; i < v.length; i += 3) { cx += v[i]; cy += v[i + 1]; cz += v[i + 2]; }
+        const m = Math.hypot(cx, cy, cz);
+        if (m < 1e-9) return { v, c: [0, 0, 1], r: Math.PI };
+        const c = [cx / m, cy / m, cz / m];
+        let min = 1;
+        for (let i = 0; i < v.length; i += 3) min = Math.min(min, v[i] * c[0] + v[i + 1] * c[1] + v[i + 2] * c[2]);
+        return { v, c, r: Math.acos(Math.max(-1, min)) + 1e-3 };
+      }
+
+      const ringsOf = (geometry) => {
+        const polys = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
+        return polys.flatMap((poly) => poly.map(toShape));
+      };
+      const regionRings = (r) => r.rings || (r.rings = ringsOf(feature(r).geometry));
+
+      const landRings = ringsOf(topojson.merge(topo, layer.geometries));
+      const graticuleLines = d3.geoGraticule10().coordinates.map(toShape);
+
+      // Border lines straight from the topology's arcs: country borders and internal borders.
+      const countryLines = [], innerLines = [];
+      {
+        const users = topo.arcs.map(() => []);
+        layer.geometries.forEach((g, gi) => {
+          const walk = (a) => (typeof a[0] === "number" ? a.forEach((i) => users[i < 0 ? ~i : i].push(gi)) : a.forEach(walk));
+          if (g.arcs) walk(g.arcs);
+        });
+        const [kx, ky] = topo.transform.scale, [tx, ty] = topo.transform.translate;
+        topo.arcs.forEach((arc, i) => {
+          let x = 0, y = 0;
+          const shape = toShape(arc.map(([dx, dy]) => [(x += dx) * kx + tx, (y += dy) * ky + ty]));
+          const u = users[i];
+          if (u.length < 2) return; // coastline: drawn as the outline of the land fill
+          if (regions[u[0]].country !== regions[u[1]].country) countryLines.push(shape);
+          else if (u[0] !== u[1]) innerLines.push(shape);
+        });
+      }
+
+      const view = { lon: -10, lat: -25, zoom: 1, cx: 0, cy: 0, radius: 100, w: 0, h: 0 };
+      const MAX_ZOOM = 28;
+      let frame = 0, spinning = !window.matchMedia("(prefers-reduced-motion: reduce)").matches, flight = null;
+
+      function layout() {
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const w = window.innerWidth, h = window.innerHeight;
+        if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+          canvas.width = Math.round(w * dpr);
+          canvas.height = Math.round(h * dpr);
+        }
+        view.w = w; view.h = h; view.dpr = dpr;
+        const panel = $("panel").getBoundingClientRect();
+        if (window.matchMedia("(min-width: 800px)").matches) {
+          const left = panel.right;
+          view.cx = (left + w) / 2;
+          view.cy = h / 2;
+          view.radius = Math.min(w - left, h) / 2 - 28;
+        } else {
+          const top = panel.bottom, bottom = $("guesses").getBoundingClientRect().top;
+          view.cx = w / 2;
+          view.cy = (top + bottom) / 2;
+          view.radius = Math.min(w, bottom - top) / 2 - 10;
+        }
+        view.radius = Math.max(view.radius, 90);
+        redraw();
+      }
+
+      function redraw() {
+        if (!frame) frame = requestAnimationFrame(draw);
+      }
+
+      // --- per-frame camera: rotation matrix rows (screen x, screen y-up, depth)
+      let m0, m1, m2, m3, m4, m5, m6, m7, m8, S, CX, CY, visibleCap, arcStep;
+
+      function setCamera() {
+        const l = view.lon * RAD, p = view.lat * RAD;
+        const cl = Math.cos(l), sl = Math.sin(l), cp = Math.cos(p), sp = Math.sin(p);
+        m0 = -sl; m1 = cl; m2 = 0;
+        m3 = -sp * cl; m4 = -sp * sl; m5 = cp;
+        m6 = cp * cl; m7 = cp * sl; m8 = sp;
+        S = view.radius * view.zoom; CX = view.cx; CY = view.cy;
+        // how much of the sphere can be on screen at all
+        const reach = Math.hypot(Math.max(CX, view.w - CX), Math.max(CY, view.h - CY));
+        visibleCap = reach >= S ? Math.PI / 2 : Math.asin(reach / S) + 0.01;
+        arcStep = Math.sqrt(2.4 / S);
+      }
+
+      const depthOf = (shape) => shape.c[0] * m6 + shape.c[1] * m7 + shape.c[2] * m8;
+
+      /** Add the visible parts of a set of lines to the current path. */
+      function traceLines(shapes) {
+        for (const shape of shapes) {
+          if (Math.acos(Math.max(-1, Math.min(1, depthOf(shape)))) > visibleCap + shape.r) continue;
+          const v = shape.v;
+          const last = v.length - 3;
+          let pX = 0, pY = 0, pZ = 0, lx = 1e9, ly = 1e9;
+          for (let i = 0; i < v.length; i += 3) {
+            const a = v[i], b = v[i + 1], c = v[i + 2];
+            const X = a * m0 + b * m1 + c * m2, Y = a * m3 + b * m4 + c * m5, Z = a * m6 + b * m7 + c * m8;
+            if (Z >= 0) {
+              const sx = CX + S * X, sy = CY - S * Y;
+              if (i && pZ < 0) {
+                const t = pZ / (pZ - Z), ix = pX + (X - pX) * t, iy = pY + (Y - pY) * t, n = Math.hypot(ix, iy) || 1;
+                ctx.moveTo(CX + (S * ix) / n, CY - (S * iy) / n);
+                ctx.lineTo(sx, sy); lx = sx; ly = sy;
+              } else if (!i) { ctx.moveTo(sx, sy); lx = sx; ly = sy; }
+              // skip steps smaller than a pixel: they cost path work and change nothing
+              else if (i === last || Math.abs(sx - lx) + Math.abs(sy - ly) > 0.8) { ctx.lineTo(sx, sy); lx = sx; ly = sy; }
+            } else if (i && pZ >= 0) {
+              const t = pZ / (pZ - Z), ix = pX + (X - pX) * t, iy = pY + (Y - pY) * t, n = Math.hypot(ix, iy) || 1;
+              ctx.lineTo(CX + (S * ix) / n, CY - (S * iy) / n);
+            }
+            pX = X; pY = Y; pZ = Z;
+          }
+        }
+      }
+
+      /**
+       * Add polygon rings to the current path for an even-odd fill. Points on the
+       * far side are slid out to the limb, so the hidden part of a ring collapses
+       * onto the globe's edge. That is exact unless the point opposite the viewer
+       * lies inside the polygon, in which case the caller adds the full disc.
+       */
+      function traceRings(rings) {
+        const wrap = (d) => d - TAU * Math.round(d / TAU);
+        for (const ring of rings) {
+          const off = Math.acos(Math.max(-1, Math.min(1, depthOf(ring))));
+          if (off > visibleCap + ring.r && Math.PI - off > ring.r) continue;
+          const v = ring.v;
+          let pX = 0, pY = 0, pZ = 0, hidden = false, raw = 0, cur = 0, emitted = 0, lx = 1e9, ly = 1e9;
+          for (let i = 0; i < v.length; i += 3) {
+            const a = v[i], b = v[i + 1], c = v[i + 2];
+            const X = a * m0 + b * m1 + c * m2, Y = a * m3 + b * m4 + c * m5, Z = a * m6 + b * m7 + c * m8;
+            if (i === 0) {
+              if (Z >= 0) ctx.moveTo(CX + S * X, CY - S * Y);
+              else {
+                hidden = true;
+                raw = cur = emitted = Math.atan2(-Y, X);
+                ctx.moveTo(CX + S * Math.cos(raw), CY + S * Math.sin(raw));
+              }
+            } else if (Z >= 0) {
+              if (hidden) {
+                const t = pZ / (pZ - Z), edge = Math.atan2(-(pY + (Y - pY) * t), pX + (X - pX) * t);
+                cur += wrap(edge - raw);
+                if (cur !== emitted) ctx.arc(CX, CY, S, emitted, cur, cur < emitted);
+                hidden = false;
+                lx = 1e9;
+              }
+              const sx = CX + S * X, sy = CY - S * Y;
+              if (Math.abs(sx - lx) + Math.abs(sy - ly) > 0.8) { ctx.lineTo(sx, sy); lx = sx; ly = sy; }
+            } else {
+              const here = Math.atan2(-Y, X);
+              if (!hidden) {
+                const t = pZ / (pZ - Z), edge = Math.atan2(-(pY + (Y - pY) * t), pX + (X - pX) * t);
+                ctx.lineTo(CX + S * Math.cos(edge), CY + S * Math.sin(edge));
+                raw = cur = emitted = edge;
+                hidden = true;
+              }
+              cur += wrap(here - raw);
+              raw = here;
+              if (Math.abs(cur - emitted) > arcStep) {
+                ctx.arc(CX, CY, S, emitted, cur, cur < emitted);
+                emitted = cur;
+              }
+            }
+            pX = X; pY = Y; pZ = Z;
+          }
+          if (hidden && cur !== emitted) ctx.arc(CX, CY, S, emitted, cur, cur < emitted);
+          ctx.closePath();
+        }
+      }
+
+      const addDisc = () => { ctx.moveTo(CX + S, CY); ctx.arc(CX, CY, S, 0, TAU); ctx.closePath(); };
+
+      // Is point `p` on land? Counts coastline crossings along the great-circle
+      // path from p to a fixed spot in the open South Pacific.
+      const OCEAN = toVec([-130, -40]);
+      function onLand(p) {
+        let nx = p[1] * OCEAN[2] - p[2] * OCEAN[1], ny = p[2] * OCEAN[0] - p[0] * OCEAN[2], nz = p[0] * OCEAN[1] - p[1] * OCEAN[0];
+        const len = Math.hypot(nx, ny, nz);
+        if (len < 1e-6) return false;
+        nx /= len; ny /= len; nz /= len;
+        let crossings = 0;
+        for (const ring of landRings) {
+          if (Math.abs(ring.c[0] * nx + ring.c[1] * ny + ring.c[2] * nz) > Math.sin(Math.min(ring.r, Math.PI / 2))) continue;
+          const v = ring.v;
+          let ax = v[0], ay = v[1], az = v[2], sa = ax * nx + ay * ny + az * nz;
+          for (let i = 3; i < v.length; i += 3) {
+            const bx = v[i], by = v[i + 1], bz = v[i + 2], sb = bx * nx + by * ny + bz * nz;
+            if (sa < 0 !== sb < 0) {
+              // where edge a→b meets the great circle, on the a/b side
+              const ex = ay * bz - az * by, ey = az * bx - ax * bz, ez = ax * by - ay * bx;
+              let x = ny * ez - nz * ey, y = nz * ex - nx * ez, z = nx * ey - ny * ex;
+              if (x * (ax + bx) + y * (ay + by) + z * (az + bz) < 0) { x = -x; y = -y; z = -z; }
+              const s1 = (p[1] * z - p[2] * y) * nx + (p[2] * x - p[0] * z) * ny + (p[0] * y - p[1] * x) * nz;
+              const s2 = (y * OCEAN[2] - z * OCEAN[1]) * nx + (z * OCEAN[0] - x * OCEAN[2]) * ny + (x * OCEAN[1] - y * OCEAN[0]) * nz;
+              if (s1 >= 0 && s2 >= 0) crossings++;
+            }
+            ax = bx; ay = by; az = bz; sa = sb;
+          }
+        }
+        return crossings % 2 === 1;
+      }
+
+      /** Path for one region, ready for an even-odd fill or a stroke. */
+      function traceRegion(r, farSide, farLonLat) {
+        traceRings(regionRings(r));
+        const cv = r.cvec || (r.cvec = toVec(centroid(r)));
+        const near = cv[0] * farSide[0] + cv[1] * farSide[1] + cv[2] * farSide[2];
+        if (near > 0 && d3.geoContains(feature(r), farLonLat)) addDisc();
+      }
+
+      function draw(now) {
+        frame = 0;
+        if (flight) {
+          if (flight.start === null) flight.start = now;
+          const t = Math.max(0, Math.min(1, (now - flight.start) / flight.ms));
+          const e = d3.easeCubicInOut(t);
+          view.lon = flight.from[0] + flight.dLon * e;
+          view.lat = flight.from[1] + (flight.to[1] - flight.from[1]) * e;
+          view.zoom = flight.zoom[0] + (flight.zoom[1] - flight.zoom[0]) * e;
+          if (t >= 1) flight = null;
+          redraw();
+        } else if (spinning) {
+          view.lon -= 0.06;
+          redraw();
+        }
+
+        const { w, h, dpr, cx, cy } = view;
+        setCamera();
+        const scale = S;
+        projection.translate([cx, cy]).scale(scale).rotate([-view.lon, -view.lat, 0]);
+        const farSide = [-m6, -m7, -m8], farLonLat = [view.lon + 180, -view.lat];
+
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, w, h);
+        ctx.lineJoin = "round";
+
+        // atmosphere + ocean
+        const glow = ctx.createRadialGradient(cx, cy, scale * 0.96, cx, cy, scale * 1.14);
+        glow.addColorStop(0, "rgba(96,140,220,0.30)");
+        glow.addColorStop(1, "rgba(96,140,220,0)");
+        ctx.fillStyle = glow;
+        ctx.beginPath(); ctx.arc(cx, cy, scale * 1.14, 0, TAU); ctx.fill();
+
+        const ocean = ctx.createRadialGradient(cx - scale * 0.35, cy - scale * 0.4, scale * 0.1, cx, cy, scale);
+        ocean.addColorStop(0, "#16233b");
+        ocean.addColorStop(1, "#0b1322");
+        ctx.fillStyle = ocean;
+        ctx.beginPath(); addDisc(); ctx.fill();
+
+        ctx.strokeStyle = "rgba(255,255,255,0.045)"; ctx.lineWidth = 1;
+        ctx.beginPath(); traceLines(graticuleLines); ctx.stroke();
+
+        ctx.fillStyle = "#283142";
+        ctx.beginPath(); traceRings(landRings);
+        if (onLand(farSide)) addDisc();
+        ctx.fill("evenodd");
+        ctx.strokeStyle = "rgba(255,255,255,0.20)"; ctx.lineWidth = 0.6;
+        ctx.stroke(); // coastline
+
+        if (view.zoom >= 1.6) {
+          ctx.strokeStyle = `rgba(255,255,255,${Math.min(0.13, 0.04 * view.zoom)})`;
+          ctx.lineWidth = 0.6;
+          ctx.beginPath(); traceLines(innerLines); ctx.stroke();
+        }
+
+        const revealed = gam_e.done ? answer : null;
+        const shown = entries.filter((e) => e.region !== revealed);
+        ctx.strokeStyle = "rgba(8,12,20,0.75)"; ctx.lineWidth = 0.8;
+        for (const e of shown) {
+          ctx.fillStyle = e.color;
+          ctx.beginPath(); traceRegion(e.region, farSide, farLonLat);
+          ctx.fill("evenodd"); ctx.stroke();
+        }
+
+        ctx.strokeStyle = "rgba(255,255,255,0.26)"; ctx.lineWidth = 0.7;
+        ctx.beginPath(); traceLines(countryLines); ctx.stroke();
+
+        if (revealed) {
+          ctx.fillStyle = WIN;
+          ctx.strokeStyle = "#eafff3"; ctx.lineWidth = 1.4;
+          ctx.beginPath(); traceRegion(revealed, farSide, farLonLat);
+          ctx.fill("evenodd"); ctx.stroke();
+        }
+
+        // dots for regions too small to see at this zoom
+        const centre = [view.lon, view.lat];
+        const dots = revealed ? [...shown, { region: revealed, color: WIN }] : shown;
+        for (const e of dots) {
+          const r = e.region;
+          if (extent(r) * scale > 9) continue;
+          if (d3.geoDistance(centroid(r), centre) > Math.PI / 2 - 0.02) continue;
+          const [x, y] = projection(centroid(r));
+          ctx.beginPath(); ctx.arc(x, y, r === revealed ? 6.5 : 5, 0, TAU);
+          ctx.fillStyle = e.color; ctx.fill();
+          ctx.strokeStyle = r === revealed || r.id === latestId ? "#fff" : "rgba(8,12,20,0.85)";
+          ctx.lineWidth = 1.4; ctx.stroke();
+        }
+
+        if (latestId && !revealed) {
+          const e = entries.find((x) => x.region.id === latestId);
+          if (e && extent(e.region) * scale > 9) {
+            ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.lineWidth = 1.3;
+            ctx.beginPath(); traceRegion(e.region, farSide, farLonLat); ctx.stroke();
+          }
+        }
+
+        ctx.strokeStyle = "rgba(150,185,255,0.35)"; ctx.lineWidth = 1;
+        ctx.beginPath(); addDisc(); ctx.stroke();
+      }
+
+      /** Fly so that a cap of the sphere (centre lon/lat, angular radius) fills the view. */
+      function flyToCap([lon, lat], size, maxAuto) {
+        spinning = false;
+        const dLon = ((lon - view.lon + 540) % 360) - 180;
+        const want = Math.min(MAX_ZOOM, Math.max(1, 70 / (Math.max(size, 0.004) * view.radius)));
+        const zoom = maxAuto ? Math.min(want, Math.max(view.zoom, Math.min(want, maxAuto))) : want;
+        flight = { start: null, ms: 850, from: [view.lon, view.lat], to: [lon, lat], dLon, zoom: [view.zoom, zoom] };
+        redraw();
+      }
+
+      // zoom in just enough that the region is comfortably visible
+      const flyTo = (region) => flyToCap(centroid(region), extent(region), 2.5);
+
+      function zoomBy(factor) {
+        flight = null;
+        view.zoom = Math.max(1, Math.min(MAX_ZOOM, view.zoom * factor));
+        redraw();
+      }
+
+      // --- pointer interaction: drag to rotate, pinch / wheel to zoom
+
+      const pointers = new Map();
+      let pinch = null, moved = 0;
+
+      canvas.addEventListener("pointerdown", (ev) => {
+        try { canvas.setPointerCapture(ev.pointerId); } catch { /* synthetic pointer */ }
+        pointers.set(ev.pointerId, [ev.clientX, ev.clientY]);
+        spinning = false; flight = null; moved = 0;
+        canvas.classList.add("dragging");
+        hideTip();
+        if (pointers.size === 2) {
+          const [a, b] = [...pointers.values()];
+          pinch = { dist: Math.hypot(a[0] - b[0], a[1] - b[1]), zoom: view.zoom };
+        }
+        if (document.activeElement === input) input.blur();
+      });
+
+      canvas.addEventListener("pointermove", (ev) => {
+        const prev = pointers.get(ev.pointerId);
+        if (!prev) { if (ev.pointerType === "mouse") hover(ev.clientX, ev.clientY); return; }
+        pointers.set(ev.pointerId, [ev.clientX, ev.clientY]);
+        if (pointers.size === 2 && pinch) {
+          const [a, b] = [...pointers.values()];
+          view.zoom = Math.max(1, Math.min(MAX_ZOOM, (pinch.zoom * Math.hypot(a[0] - b[0], a[1] - b[1])) / pinch.dist));
+          moved = 99;
+        } else if (pointers.size === 1) {
+          const dx = ev.clientX - prev[0], dy = ev.clientY - prev[1];
+          moved += Math.abs(dx) + Math.abs(dy);
+          const k = 180 / Math.PI / (view.radius * view.zoom);
+          view.lon -= dx * k;
+          view.lat = Math.max(-89, Math.min(89, view.lat + dy * k));
+        }
+        redraw();
+      });
+
+      const release = (ev) => {
+        if (!pointers.has(ev.pointerId)) return;
+        pointers.delete(ev.pointerId);
+        if (pointers.size < 2) pinch = null;
+        if (!pointers.size) {
+          canvas.classList.remove("dragging");
+          if (moved < 6 && ev.type === "pointerup") hover(ev.clientX, ev.clientY, true);
+        }
+      };
+      canvas.addEventListener("pointerup", release);
+      canvas.addEventListener("pointercancel", release);
+      canvas.addEventListener("pointerleave", hideTip);
+
+      canvas.addEventListener("wheel", (ev) => {
+        ev.preventDefault();
+        spinning = false;
+        zoomBy(Math.exp(-ev.deltaY * (ev.deltaMode ? 0.05 : 0.0016)));
+      }, { passive: false });
+
+      $("zoom-in").addEventListener("click", () => zoomBy(1.6));
+      $("zoom-out").addEventListener("click", () => zoomBy(1 / 1.6));
+
+      // --- tooltip for coloured regions
+
+      const tip = $("tooltip");
+      function hideTip() { tip.hidden = true; }
+
+      function pick(x, y) {
+        const scale = view.radius * view.zoom;
+        if (Math.hypot(x - view.cx, y - view.cy) > scale) return null;
+        const pool = entries.map((e) => e.region);
+        if (gam_e.done && !pool.includes(answer)) pool.push(answer);
+        const centre = [view.lon, view.lat];
+        let hit = null, bestPx = 11;
+        for (const r of pool) {
+          if (extent(r) * scale > 9 || d3.geoDistance(centroid(r), centre) > Math.PI / 2) continue;
+          const [px, py] = projection(centroid(r));
+          const d = Math.hypot(px - x, py - y);
+          if (d < bestPx) { bestPx = d; hit = r; }
+        }
+        if (hit) return hit;
+        const point = projection.invert([x, y]);
+        if (!point) return null;
+        return pool.find((r) => d3.geoContains(feature(r), point)) || null;
+      }
+
+      function hover(x, y, tap) {
+        const r = pick(x, y);
+        if (!r) return hideTip();
+        const e = entries.find((en) => en.region === r);
+        const dist = r === answer ? "the mystery region" : e.km === 0 ? "borders the mystery region" : `${fmtDist(e.km)} away`;
+        tip.innerHTML = `<b>${esc(r.name)}</b><span>${esc(subtitle(r))} · ${dist}</span>`;
+        tip.hidden = false;
+        const box = tip.getBoundingClientRect();
+        tip.style.left = `${Math.max(8, Math.min(view.w - box.width - 8, x + 14))}px`;
+        tip.style.top = `${Math.max(8, Math.min(view.h - box.height - 8, y + (tap ? -box.height - 14 : 16)))}px`;
+      }
+
+      // --------------------------------------------------------- country picker
+
+      function poolLabel(countries) {
+        if (!countries.length) return "All countries";
+        if (countries.length <= 2) return countries.join(" & ");
+        return `${countries[0]} + ${countries.length - 1} more`;
+      }
+
+      /** Frame the countries the current practice gam_e draws from. */
+      function showPool() {
+        if (!allowed) return;
+        const members = regions.filter((r) => allowed.has(r.country));
+        let x = 0, y = 0, z = 0;
+        for (const r of members) { const v = toVec(centroid(r)); x += v[0]; y += v[1]; z += v[2]; }
+        const m = Math.hypot(x, y, z);
+        if (m < 1e-6) return;
+        const mid = [x / m, y / m, z / m];
+        const size = Math.max(...members.map((r) => angle(mid, toVec(centroid(r))) + extent(r) / 2));
+        flyToCap([Math.atan2(mid[1], mid[0]) / RAD, Math.asin(mid[2]) / RAD], Math.min(size * 1.3, 3));
+      }
+
+      const picker = $("countries"), countryList = $("country-list"), countrySearch = $("country-search");
+      const countryNames = [...countryCounts.keys()].sort((a, b) => a.localeCompare(b));
+      let picked = new Set();
+
+      countryList.innerHTML = countryNames
+        .map((c, i) => `<label data-key="${esc(norm(c))}"><input type="checkbox" value="${i}"><span>${esc(c)}</span><i>${countryCounts.get(c)}</i></label>`)
+        .join("");
+
+      function syncPicker() {
+        for (const box of countryList.querySelectorAll("input")) box.checked = picked.has(countryNames[+box.value]);
+        const n = [...picked].reduce((sum, c) => sum + countryCounts.get(c), 0);
+        $("country-summary").textContent = picked.size
+          ? `${picked.size} ${picked.size === 1 ? "country" : "countries"} · ${n.toLocaleString("en")} regions`
+          : `Whole world · ${regions.length.toLocaleString("en")} regions`;
+      }
+
+      function filterPicker() {
+        const q = norm(countrySearch.value);
+        for (const row of countryList.children) row.hidden = !!q && !row.dataset.key.includes(q);
+      }
+
+      $("pool-btn").addEventListener("click", () => {
+        picked = new Set(gam_e.countries);
+        countrySearch.value = "";
+        // ticked countries first, then alphabetical
+        const rows = [...countryList.children].sort((a, b) => {
+          const ia = +a.firstChild.value, ib = +b.firstChild.value;
+          return picked.has(countryNames[ib]) - picked.has(countryNames[ia]) || ia - ib;
+        });
+        countryList.append(...rows);
+        filterPicker();
+        syncPicker();
+        picker.showModal();
+        countryList.scrollTop = 0;
+      });
+      countrySearch.addEventListener("input", filterPicker);
+      countryList.addEventListener("change", (ev) => {
+        const name = countryNames[+ev.target.value];
+        ev.target.checked ? picked.add(name) : picked.delete(name);
+        syncPicker();
+      });
+      $("country-clear").addEventListener("click", () => { picked.clear(); syncPicker(); });
+      $("country-cancel").addEventListener("click", () => picker.close());
+      picker.addEventListener("click", (ev) => { if (ev.target === picker) picker.close(); });
+      $("country-apply").addEventListener("click", () => {
+        saved.countries = countryNames.filter((c) => picked.has(c));
+        saved.practice = newPractice();
+        picker.close();
+        switchMode("practice");
+        showPool();
+      });
+
+      // ------------------------------------------------------------------ start
+
+      // open the page with #debug to poke at the camera from the console
+      if (location.hash === "#debug") window.glubdivision = { view, draw, redraw };
+
+      window.addEventListener("resize", layout);
+      loadMode();
+      renderAll();
+      if (gam_e.done) flyTo(answer);
+      else if (entries.length) flyTo(entries[entries.length - 1].region);
+
+      if (!saved.seenHelp) {
+        saved.seenHelp = true;
+        persist();
+        help.showModal();
+      }
+    })();
+
+  </script>
 </body>
 </html>
