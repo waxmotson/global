@@ -4,7 +4,7 @@
 
   const EARTH_KM = 6371;
   const STORE_KEY = "glubdivision:v1";
-  const OLD_STORE_KEY = "hinterland:v1"; // the game's previous name
+  const OLD_STORE_KEY = "hinterland:v1"; // the gam_e's previous name
   const WIN = "#3ddc84";
   const $ = (id) => document.getElementById(id);
 
@@ -141,15 +141,15 @@
   saved.practice.countries = cleanCountries(saved.practice.countries);
   for (const g of [saved.daily, saved.practice]) g.guesses = (g.guesses || []).filter((id) => byId.has(id));
 
-  // ------------------------------------------------------------- game state
+  // ------------------------------------------------------------- gam_e state
 
-  let game, answer, entries, latestId = null, allowed = null;
+  let gam_e, answer, entries, latestId = null, allowed = null;
 
   function loadMode() {
-    game = saved[saved.mode];
-    allowed = saved.mode === "practice" && game.countries.length ? new Set(game.countries) : null;
-    answer = byId.get(saved.mode === "daily" ? dailyAnswerId(game.date) : game.answer);
-    entries = game.guesses.map(makeEntry);
+    gam_e = saved[saved.mode];
+    allowed = saved.mode === "practice" && gam_e.countries.length ? new Set(gam_e.countries) : null;
+    answer = byId.get(saved.mode === "daily" ? dailyAnswerId(gam_e.date) : gam_e.answer);
+    entries = gam_e.guesses.map(makeEntry);
     latestId = null;
   }
 
@@ -167,7 +167,7 @@
   const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
   function guess(region) {
-    if (game.done) return;
+    if (gam_e.done) return;
     const existing = entries.find((e) => e.region === region);
     if (existing) {
       latestId = region.id;
@@ -179,7 +179,7 @@
     const best = entries.length ? Math.min(...entries.map((e) => e.km)) : Infinity;
     const entry = makeEntry(region.id);
     entries.push(entry);
-    game.guesses.push(region.id);
+    gam_e.guesses.push(region.id);
     latestId = region.id;
 
     if (region === answer) {
@@ -196,7 +196,7 @@
   }
 
   function finish(outcome) {
-    game.done = outcome;
+    gam_e.done = outcome;
     const s = saved.stats;
     s.played++;
     if (outcome === "won") { s.won++; s.guessTotal += entries.length; }
@@ -205,7 +205,7 @@
         const y = new Date(); y.setDate(y.getDate() - 1);
         s.streak = s.lastDaily === dateKey(y) ? s.streak + 1 : 1;
         s.best = Math.max(s.best, s.streak);
-        s.lastDaily = game.date;
+        s.lastDaily = gam_e.date;
       } else {
         s.streak = 0;
       }
@@ -230,29 +230,29 @@
     for (const tab of document.querySelectorAll(".tabs button")) {
       tab.setAttribute("aria-selected", String(tab.dataset.mode === saved.mode));
     }
-    form.hidden = !!game.done;
-    $("actions").hidden = !!game.done;
-    statusEl.hidden = !!game.done;
+    form.hidden = !!gam_e.done;
+    $("actions").hidden = !!gam_e.done;
+    statusEl.hidden = !!gam_e.done;
     $("unit-btn").textContent = saved.unit;
 
     const hints = hintTexts();
-    $("hints").innerHTML = hints.slice(0, game.hints).map((h) => `<li>${esc(h)}</li>`).join("");
-    $("hint-btn").disabled = game.hints >= hints.length;
-    $("hint-btn").textContent = game.hints >= hints.length ? "No more hints" : `Hint ${game.hints + 1}/${hints.length}`;
+    $("hints").innerHTML = hints.slice(0, gam_e.hints).map((h) => `<li>${esc(h)}</li>`).join("");
+    $("hint-btn").disabled = gam_e.hints >= hints.length;
+    $("hint-btn").textContent = gam_e.hints >= hints.length ? "No more hints" : `Hint ${gam_e.hints + 1}/${hints.length}`;
 
-    if (!game.done && !statusEl.innerHTML) {
+    if (!gam_e.done && !statusEl.innerHTML) {
       setStatus(
         entries.length
           ? "Keep going — warmer colours are closer."
           : saved.mode === "daily"
             ? "Today's mystery region is waiting. Make a first guess."
             : allowed
-              ? `A mystery region in ${esc(poolLabel(game.countries))} is waiting.`
+              ? `A mystery region in ${esc(poolLabel(gam_e.countries))} is waiting.`
               : "A random mystery region is waiting. Make a first guess."
       );
     }
     $("pool").hidden = saved.mode !== "practice";
-    $("pool-btn").textContent = poolLabel(saved.mode === "practice" ? game.countries : []);
+    $("pool-btn").textContent = poolLabel(saved.mode === "practice" ? gam_e.countries : []);
     renderResult();
     renderList();
     layout();
@@ -264,7 +264,7 @@
     $("guess-count").textContent = entries.length;
     const misses = entries.filter((e) => e.region !== answer);
     $("closest").innerHTML =
-      misses.length && !game.done ? `closest <b>${fmtDist(Math.min(...misses.map((e) => e.km)))}</b>` : "";
+      misses.length && !gam_e.done ? `closest <b>${fmtDist(Math.min(...misses.map((e) => e.km)))}</b>` : "";
     $("guess-list").innerHTML = sorted
       .map((e) => {
         const r = e.region;
@@ -281,12 +281,12 @@
 
   function renderResult() {
     const el = $("result");
-    el.hidden = !game.done;
-    if (!game.done) return;
-    const won = game.done === "won";
+    el.hidden = !gam_e.done;
+    if (!gam_e.done) return;
+    const won = gam_e.done === "won";
     const s = saved.stats;
     const n = entries.length;
-    const hintNote = game.hints ? ` · ${game.hints} hint${game.hints > 1 ? "s" : ""}` : "";
+    const hintNote = gam_e.hints ? ` · ${gam_e.hints} hint${gam_e.hints > 1 ? "s" : ""}` : "";
     el.className = "result" + (won ? "" : " lost");
     el.innerHTML = `
       <div class="kicker">${won ? `Found in ${n} guess${n === 1 ? "" : "es"}${hintNote}` : "The mystery region was"}</div>
@@ -300,7 +300,7 @@
       </div>
       <div class="row">
         ${won ? '<button class="btn primary" data-act="share">Share</button>' : ""}
-        <button class="btn ${won ? "" : "primary"}" data-act="practice">${saved.mode === "practice" ? "New game" : "Play practice"}</button>
+        <button class="btn ${won ? "" : "primary"}" data-act="practice">${saved.mode === "practice" ? "New gam_e" : "Play practice"}</button>
         <button class="btn" data-act="show">Show on globe</button>
       </div>
       ${saved.mode === "daily" ? `<p class="next">Next daily region in ${untilMidnight()}.</p>` : ""}`;
@@ -319,9 +319,9 @@
       return t < 0.35 ? "🟦" : t < 0.6 ? "⬜" : t < 0.78 ? "🟧" : "🟥";
     });
     const shown = squares.length > 40 ? [...squares.slice(0, 39), "…", "🟩"] : squares;
-    const label = saved.mode === "daily" ? game.date : "practice";
+    const label = saved.mode === "daily" ? gam_e.date : "practice";
     const n = entries.length;
-    const hintNote = game.hints ? `, ${game.hints} hint${game.hints > 1 ? "s" : ""}` : "";
+    const hintNote = gam_e.hints ? `, ${gam_e.hints} hint${gam_e.hints > 1 ? "s" : ""}` : "";
     return `Glubdivision ${label}\nFound in ${n} guess${n === 1 ? "" : "es"}${hintNote}\n${shown.join("")}`;
   }
 
@@ -356,7 +356,7 @@
     closeSuggestions();
     input.value = "";
     renderAll();
-    if (game.done) flyTo(answer);
+    if (gam_e.done) flyTo(answer);
     else if (entries.length) flyTo(entries[entries.length - 1].region);
   }
 
@@ -366,15 +366,15 @@
   });
 
   $("hint-btn").addEventListener("click", () => {
-    if (game.done || game.hints >= hintTexts().length) return;
-    game.hints++;
+    if (gam_e.done || gam_e.hints >= hintTexts().length) return;
+    gam_e.hints++;
     persist();
     renderAll();
   });
 
   let giveUpArmed = 0;
   $("giveup-btn").addEventListener("click", (ev) => {
-    if (game.done) return;
+    if (gam_e.done) return;
     if (Date.now() - giveUpArmed > 4000) {
       giveUpArmed = Date.now();
       ev.target.textContent = "Sure? Click again";
@@ -455,7 +455,7 @@
 
   function showSuggestions() {
     if (!input.value.trim()) return closeSuggestions();
-    const guessed = new Set(game.guesses);
+    const guessed = new Set(gam_e.guesses);
     matches = search(input.value, guessed);
     active = 0;
     rendered = 0;
@@ -816,7 +816,7 @@
       ctx.beginPath(); traceLines(innerLines); ctx.stroke();
     }
 
-    const revealed = game.done ? answer : null;
+    const revealed = gam_e.done ? answer : null;
     const shown = entries.filter((e) => e.region !== revealed);
     ctx.strokeStyle = "rgba(8,12,20,0.75)"; ctx.lineWidth = 0.8;
     for (const e of shown) {
@@ -947,7 +947,7 @@
     const scale = view.radius * view.zoom;
     if (Math.hypot(x - view.cx, y - view.cy) > scale) return null;
     const pool = entries.map((e) => e.region);
-    if (game.done && !pool.includes(answer)) pool.push(answer);
+    if (gam_e.done && !pool.includes(answer)) pool.push(answer);
     const centre = [view.lon, view.lat];
     let hit = null, bestPx = 11;
     for (const r of pool) {
@@ -982,7 +982,7 @@
     return `${countries[0]} + ${countries.length - 1} more`;
   }
 
-  /** Frame the countries the current practice game draws from. */
+  /** Frame the countries the current practice gam_e draws from. */
   function showPool() {
     if (!allowed) return;
     const members = regions.filter((r) => allowed.has(r.country));
@@ -1017,7 +1017,7 @@
   }
 
   $("pool-btn").addEventListener("click", () => {
-    picked = new Set(game.countries);
+    picked = new Set(gam_e.countries);
     countrySearch.value = "";
     // ticked countries first, then alphabetical
     const rows = [...countryList.children].sort((a, b) => {
@@ -1055,7 +1055,7 @@
   window.addEventListener("resize", layout);
   loadMode();
   renderAll();
-  if (game.done) flyTo(answer);
+  if (gam_e.done) flyTo(answer);
   else if (entries.length) flyTo(entries[entries.length - 1].region);
 
   if (!saved.seenHelp) {
