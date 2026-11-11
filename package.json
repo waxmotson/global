@@ -1,0 +1,16 @@
+{
+  "name": "glubdivision",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Guess the mystery first-level administrative subdivision on a globe.",
+  "scripts": {
+    "build:data": "node scripts/build-data.mjs",
+    "build:grid": "node scripts/build-grid-data.mjs",
+    "start": "npx --yes serve ."
+  },
+  "devDependencies": {
+    "d3": "^7.9.0",
+    "mapshaper": "^0.6.102",
+    "topojson-client": "^3.1.0"
+  }
+}

@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0e16">
+  <meta name="description" content="A daily 3×3 grid for states, provinces and regions: fill each square with a first-level subdivision that fits both its row and its column.">
+  <title>Hintergrid — the subdivision grid</title>
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="grid.css">
+</head>
+<body>
+  <div class="app">
+    <header class="top">
+      <h1>Hintergrid</h1>
+      <div class="tabs" role="tablist" aria-label="Game mode">
+        <button role="tab" id="tab-daily" data-mode="daily">Daily</button>
+        <button role="tab" id="tab-practice" data-mode="practice">Practice</button>
+        <button role="tab" id="tab-room" data-mode="room" hidden>Challenge</button>
+      </div>
+      <button class="icon-btn" id="help-btn" aria-label="How to play">?</button>
+    </header>
+
+    <p class="subtitle" id="subtitle"></p>
+
+    <div class="board" id="board"></div>
+
+    <p id="status" class="status" aria-live="polite"></p>
+
+    <div class="actions">
+      <button id="new-btn" class="btn" hidden>New grid</button>
+      <button id="custom-btn" class="btn" hidden>Custom board</button>
+      <button id="challenge-btn" class="btn" hidden>Challenge friends</button>
+      <span class="spacer"></span>
+      <button id="giveup-btn" class="btn ghost">Give up</button>
+    </div>
+
+    <section id="result" class="result" hidden></section>
+
+    <section id="room" class="room" aria-label="Challenge scoreboard" hidden></section>
+
+    <footer class="foot">
+      Same atlas, different game: <a href="index.html">Glubdivision</a>, the globe guessing game.
+    </footer>
+  </div>
+
+  <dialog id="picker" aria-labelledby="picker-title">
+    <div class="dialog-head">
+      <h2 id="picker-title">Pick a subdivision</h2>
+      <button class="icon-btn" id="picker-close" aria-label="Close">×</button>
+    </div>
+    <div class="criteria" id="picker-criteria"></div>
+    <form id="guess-form" autocomplete="off">
+      <input id="guess-input" type="text" placeholder="State, province, region…" aria-label="Search for a subdivision"
+             role="combobox" aria-expanded="true" aria-controls="suggestions" aria-autocomplete="list"
+             autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go">
+    </form>
+    <ul id="suggestions" role="listbox"></ul>
+    <p class="tried" id="picker-tried"></p>
+  </dialog>
+
+  <dialog id="answers" aria-labelledby="answers-title">
+    <div class="dialog-head">
+      <h2 id="answers-title">Possible answers</h2>
+      <button class="icon-btn" id="answers-close" aria-label="Close">×</button>
+    </div>
+    <div class="criteria" id="answers-criteria"></div>
+    <p class="fine" id="answers-count"></p>
+    <ul id="answers-list"></ul>
+  </dialog>
+
+  <dialog id="custom" aria-labelledby="custom-title">
+    <div class="dialog-head">
+      <h2 id="custom-title">Custom board</h2>
+      <button class="icon-btn" id="custom-close" aria-label="Close">×</button>
+    </div>
+    <div class="axes">
+      <fieldset>
+        <legend>Rows</legend>
+        <div id="custom-rows"></div>
+      </fieldset>
+      <fieldset>
+        <legend>Columns</legend>
+        <div id="custom-cols"></div>
+      </fieldset>
+    </div>
+    <div class="preview" id="custom-preview"></div>
+    <p class="fine note" id="custom-note"></p>
+    <div class="dialog-foot">
+      <button class="btn" id="custom-shuffle">Shuffle</button>
+      <span class="spacer"></span>
+      <button class="btn" id="custom-link">Copy link</button>
+      <button class="btn primary" id="custom-play">Play this board</button>
+    </div>
+  </dialog>
+
+  <dialog id="join" aria-labelledby="join-title">
+    <h2 id="join-title">Join challenge</h2>
+    <p class="fine" id="join-text"></p>
+    <form id="join-form" autocomplete="off">
+      <input id="name-input" type="text" maxlength="24" placeholder="Your name" aria-label="Your name" required>
+      <div class="dialog-foot">
+        <span class="spacer"></span>
+        <button type="button" class="btn" id="join-cancel">Cancel</button>
+        <button class="btn primary" id="join-go">Join</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="help" aria-labelledby="help-title">
+    <h2 id="help-title">How to play</h2>
+    <p>Fill the 3×3 grid with <strong>first-level subdivisions</strong> — states, provinces, regions, prefectures, cantons, emirates… There are <span id="total-count">thousands</span> to choose from.</p>
+    <ol>
+      <li>Tap a square. Its row and its column each set a rule.</li>
+      <li>Name a subdivision that satisfies <em>both</em> rules.</li>
+      <li>You get <strong>10 guesses</strong> for 9 squares. Right or wrong, every guess costs one.</li>
+      <li>Each subdivision can only be placed once.</li>
+    </ol>
+    <p>When the grid is over, tap any square to see everything that would have fit.</p>
+    <p class="fine"><strong>Daily</strong> is the same grid for everyone each day. <strong>Practice</strong> is unlimited: build a <strong>custom board</strong> from any six rules, or <strong>challenge friends</strong> to race you on the same board with a live scoreboard.</p>
+    <p class="fine">Name rules use the name exactly as the search box shows it. A sea coast means open sea, not a lake or the Caspian. Areas, borders and coastlines are measured from Natural Earth boundaries (public domain); a few countries are grouped up to their true first level (French and Italian regions, UK countries…).</p>
+    <form method="dialog"><button class="btn primary">Play</button></form>
+  </dialog>
+
+  <script src="vendor/d3.min.js"></script>
+  <script src="vendor/topojson-client.min.js"></script>
+  <script src="data/admin1.js"></script>
+  <script src="data/grid-facts.js"></script>
+  <script src="grid-config.js"></script>
+  <script src="grid.js"></script>
+</body>
+</html>

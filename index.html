@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0e16">
+  <meta name="description" content="Guess the mystery state, province or region. Every guess lights up on the globe — the warmer the colour, the closer you are.">
+  <title>Glubdivision — guess the mystery region</title>
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <canvas id="globe" aria-label="Globe showing your guesses, coloured by how close they are to the mystery region"></canvas>
+
+  <div class="sidebar">
+    <main class="panel" id="panel">
+      <header class="top">
+        <h1>Glubdivision</h1>
+        <div class="tabs" role="tablist" aria-label="Game mode">
+          <button role="tab" id="tab-daily" data-mode="daily">Daily</button>
+          <button role="tab" id="tab-practice" data-mode="practice">Practice</button>
+        </div>
+        <button class="icon-btn" id="help-btn" aria-label="How to play">?</button>
+      </header>
+
+      <div class="pool" id="pool" hidden>
+        <span>Mystery region from</span>
+        <button id="pool-btn" class="btn">All countries</button>
+      </div>
+
+      <form id="guess-form" class="search" autocomplete="off">
+        <input id="guess-input" type="text" placeholder="Guess a state, province, region…" aria-label="Guess a subdivision"
+               role="combobox" aria-expanded="false" aria-controls="suggestions" aria-autocomplete="list"
+               autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go">
+        <ul id="suggestions" role="listbox" hidden></ul>
+      </form>
+
+      <div id="result" class="result" hidden></div>
+
+      <p id="status" class="status" aria-live="polite"></p>
+      <ul id="hints" class="hints"></ul>
+
+      <div class="actions" id="actions">
+        <button id="hint-btn" class="btn">Hint</button>
+        <button id="giveup-btn" class="btn">Give up</button>
+        <span class="spacer"></span>
+        <button id="unit-btn" class="btn ghost" aria-label="Toggle distance unit">km</button>
+      </div>
+
+      <div class="legend" aria-hidden="true">
+        <span>far</span><i id="legend-bar"></i><span>near</span>
+      </div>
+    </main>
+
+    <section class="guesses" id="guesses" aria-label="Your guesses">
+      <div class="guesses-head">
+        <h2>Guesses <span id="guess-count" class="count">0</span></h2>
+        <span id="closest" class="closest"></span>
+      </div>
+      <ol id="guess-list"></ol>
+    </section>
+  </div>
+
+  <div class="zoom">
+    <button id="zoom-in" aria-label="Zoom in">+</button>
+    <button id="zoom-out" aria-label="Zoom out">−</button>
+  </div>
+
+  <div id="tooltip" class="tooltip" hidden></div>
+
+  <dialog id="help">
+    <h2>How to play</h2>
+    <p>Somewhere on Earth there is a mystery <strong>first-level subdivision</strong> — a state, province, region, prefecture, canton, emirate… There are <span id="total-count">thousands</span> of them. Find it.</p>
+    <ol>
+      <li>Type any subdivision and pick it from the list.</li>
+      <li>It lights up on the globe. <b class="cold">Cold blue</b> means far away, <b class="hot">hot red</b> means close. Distance is measured border to border, so a neighbour is 0&nbsp;km away.</li>
+      <li>Keep narrowing in until you hit the mystery region.</li>
+    </ol>
+    <p>Drag to spin the globe, scroll or pinch to zoom. Stuck? Hints reveal the kind of unit, then its country, then its first letter.</p>
+    <p class="fine"><strong>Daily</strong> is the same region for everyone each day. <strong>Practice</strong> is unlimited.</p>
+    <p class="fine">Boundaries: Natural Earth (public domain). A few countries are grouped up to their true first level (e.g. French regions, Italian regions, UK countries).</p>
+    <form method="dialog"><button class="btn primary">Play</button></form>
+  </dialog>
+
+  <dialog id="countries">
+    <h2>Practice countries</h2>
+    <p class="fine">Tick the countries the mystery region may come from. Suggestions are limited to them too. Leave everything unticked to play the whole world.</p>
+    <input id="country-search" type="search" placeholder="Search countries…" aria-label="Search countries" autocomplete="off">
+    <div id="country-list" class="country-list"></div>
+    <div class="dialog-foot">
+      <span id="country-summary" class="fine"></span>
+      <button class="btn ghost" id="country-clear" type="button">Clear</button>
+      <button class="btn" id="country-cancel" type="button">Cancel</button>
+      <button class="btn primary" id="country-apply" type="button">Start new game</button>
+    </div>
+  </dialog>
+
+  <script src="vendor/d3.min.js"></script>
+  <script src="vendor/topojson-client.min.js"></script>
+  <script src="data/admin1.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>
