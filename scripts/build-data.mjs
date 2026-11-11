@@ -30,7 +30,7 @@ if (!existsSync(SRC)) {
 // --- configuration ---------------------------------------------------------
 
 // Territories that are not administrative subdivisions of anything.
-const DROP = new Set(["ATA", "USG", "KAB", "KAS", "CSI", "ATC", "CLP", "PGA", "HMD"]);
+const DROP = new Set(["ATA", "USG", "KAS", "CSI", "ATC", "CLP", "PGA", "HMD"]);
 
 // Countries whose Natural Earth units are below first level: dissolve by `field`.
 const DISSOLVE = {
@@ -181,6 +181,13 @@ const outerOnly = (geometry) =>
 // --- prepare features ------------------------------------------------------
 
 const source = JSON.parse(readFileSync(SRC, "utf8"));
+// Baikonur is Kazakh land leased to Russia. Natural Earth cuts it out of
+// Kyzylorda Region as a separate unit; fold it back in so the map has no hole.
+const kyzylorda = source.features.find((f) => f.properties.adm1_code === "KAZ-3197");
+for (const f of source.features) {
+  if (f.properties.adm0_a3 === "KAB" && kyzylorda) f.properties = { ...kyzylorda.properties };
+}
+
 let features = source.features.filter((f) => {
   const p = f.properties;
   return f.geometry && p.name && !DROP.has(p.adm0_a3);

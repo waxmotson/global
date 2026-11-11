@@ -410,13 +410,14 @@
 
   let matches = [], active = 0;
 
-  function search(text) {
+  function search(text, guessed = new Set()) {
     const q = norm(text);
     if (!q) return [];
     const tokens = q.split(" ");
     const out = [];
     for (const r of regions) {
       if (allowed && !allowed.has(r.country)) continue;
+      if (guessed.has(r.id)) continue;
       if (!tokens.every((t) => r.hay.includes(t))) continue;
       let rank;
       if (r.key === q) rank = 0;
@@ -430,29 +431,49 @@
       out.push([rank, r]);
     }
     out.sort((a, b) => a[0] - b[0] || a[1].key.length - b[1].key.length || a[1].key.localeCompare(b[1].key));
-    return out.slice(0, 8).map((m) => m[1]);
+    return out.map((m) => m[1]);
+  }
+
+  // Every match is listed; rows are added in chunks as the list scrolls.
+  const CHUNK = 60;
+  let rendered = 0;
+
+  function suggestionRow(r, i) {
+    const q = norm(input.value);
+    const via = !r.key.includes(q) ? r.alts.find((a) => norm(a).includes(q)) : null;
+    return `<li role="option" id="opt-${i}" data-i="${i}" aria-selected="${i === active}">
+      <span class="s-name">${esc(r.name)}${via ? ` <span class="s-sub">(${esc(via)})</span>` : ""}</span>
+      <span class="s-sub">${esc(subtitle(r))}</span></li>`;
+  }
+
+  function renderMore(upTo = rendered + CHUNK) {
+    const end = Math.min(matches.length, upTo);
+    if (end <= rendered) return;
+    list.insertAdjacentHTML("beforeend", matches.slice(rendered, end).map((r, k) => suggestionRow(r, rendered + k)).join(""));
+    rendered = end;
   }
 
   function showSuggestions() {
-    matches = search(input.value);
-    active = 0;
     if (!input.value.trim()) return closeSuggestions();
     const guessed = new Set(game.guesses);
-    list.innerHTML = matches.length
-      ? matches
-          .map((r, i) => {
-            const q = norm(input.value);
-            const via = !r.key.includes(q) ? r.alts.find((a) => norm(a).includes(q)) : null;
-            return `<li role="option" id="opt-${i}" data-i="${i}" aria-selected="${i === active}" class="${guessed.has(r.id) ? "used" : ""}">
-              <span class="s-name">${esc(r.name)}${via ? ` <span class="s-sub">(${esc(via)})</span>` : ""}</span>
-              <span class="s-sub">${esc(subtitle(r))}${guessed.has(r.id) ? " · already guessed" : ""}</span></li>`;
-          })
-          .join("")
-      : '<li class="none">No subdivision matches that.</li>';
+    matches = search(input.value, guessed);
+    active = 0;
+    rendered = 0;
+    list.innerHTML = "";
+    list.scrollTop = 0;
+    if (matches.length) renderMore();
+    else {
+      const onlyGuessed = search(input.value).length > 0;
+      list.innerHTML = `<li class="none">${onlyGuessed ? "You've already guessed everything matching that." : "No subdivision matches that."}</li>`;
+    }
     list.hidden = false;
     input.setAttribute("aria-expanded", "true");
     input.setAttribute("aria-activedescendant", matches.length ? "opt-0" : "");
   }
+
+  list.addEventListener("scroll", () => {
+    if (list.scrollTop + list.clientHeight > list.scrollHeight - 200) renderMore();
+  });
 
   function closeSuggestions() {
     list.hidden = true;
@@ -463,8 +484,11 @@
 
   function setActive(i) {
     if (!matches.length) return;
+    const prev = list.children[active];
     active = (i + matches.length) % matches.length;
-    list.querySelectorAll("li").forEach((li, k) => li.setAttribute("aria-selected", String(k === active)));
+    if (active >= rendered) renderMore(active + CHUNK);
+    if (prev) prev.setAttribute("aria-selected", "false");
+    list.children[active].setAttribute("aria-selected", "true");
     input.setAttribute("aria-activedescendant", `opt-${active}`);
     list.children[active].scrollIntoView({ block: "nearest" });
   }
